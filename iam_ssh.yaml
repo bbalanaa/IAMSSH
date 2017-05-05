@@ -1,0 +1,280 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS EC2 SSH access with IAM showcase'
+Parameters:
+  VPC:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: 'The VPC the EC2 instance is launched into.'
+  Subnet:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: 'The subnet the EC2 instance is launched into.'
+  AssumeRole:
+    Type: 'String'
+    Description: 'Optional IAM role ARN to assume to get the IAM users from another account'
+    Default: ''
+  KeyName:
+    Description: 'Optional key pair of the ec2-user to establish a SSH connection to the EC2 instance when things go wrong.'
+    Type: String
+    Default: ''
+Mappings:
+  RegionMap:
+    'ap-south-1':
+      AMI: 'ami-52c7b43d'
+    'eu-west-2':
+      AMI: 'ami-b6daced2'
+    'eu-west-1':
+      AMI: 'ami-01ccc867'
+    'ap-northeast-2':
+      AMI: 'ami-9d15c7f3'
+    'ap-northeast-1':
+      AMI: 'ami-923d12f5'
+    'sa-east-1':
+      AMI: 'ami-37cfad5b'
+    'ca-central-1':
+      AMI: 'ami-0bd66a6f'
+    'ap-southeast-1':
+      AMI: 'ami-fc5ae39f'
+    'ap-southeast-2':
+      AMI: 'ami-162c2575'
+    'eu-central-1':
+      AMI: 'ami-b968bad6'
+    'us-east-1':
+      AMI: 'ami-c58c1dd3'
+    'us-east-2':
+      AMI: 'ami-4191b524'
+    'us-west-1':
+      AMI: 'ami-7a85a01a'
+    'us-west-2':
+      AMI: 'ami-4836a428'
+Conditions:
+  UseCrossAccountIAM: !Not [!Equals [!Ref AssumeRole, '']]
+  UseLocalIAM: !Equals [!Ref AssumeRole, '']
+  HasKeyName: !Not [!Equals [!Ref KeyName, '']]
+Resources:
+  SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: ssh
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - CidrIp: '0.0.0.0/0'
+        IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+      - !Ref Role
+  Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'ec2.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Path: /
+  CrossAccountRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: UseCrossAccountIAM
+    Properties:
+      PolicyName: crossaccountiam
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sts:AssumeRole'
+            Resource: !Ref AssumeRole
+      Roles:
+        - !Ref Role
+  LocalRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: UseLocalIAM
+    Properties:
+      PolicyName: iam
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: 
+          - 'iam:ListUsers'
+          - 'iam:GetGroup'
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - 'iam:ListSSHPublicKeys'
+          - 'iam:GetSSHPublicKey'
+          Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:user/*'
+      Roles:
+        - !Ref Role
+  Instance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      'AWS::CloudFormation::Init':
+        config:
+          packages:
+            yum:
+              git: []
+          files:
+            '/opt/install.sh':
+              content: |
+                #!/bin/bash -e
+                show_help() {
+                cat << EOF
+                Usage: ${0##*/} [-hv] [-a ARN] [-i GROUP,GROUP,...] [-l GROUP,GROUP,...] [-s GROUP]
+                Install import_users.sh and authorized_key_commands.
+
+                    -h              display this help and exit
+                    -v              verbose mode.
+
+                    -a arn          Assume a role before contacting AWS IAM to get users and keys.
+                                    This can be used if you define your users in one AWS account, while the EC2
+                                    instance you use this script runs in another.
+                    -i group,group  Which IAM groups have access to this instance
+                                    Comma seperated list of IAM groups. Leave empty for all available IAM users
+                    -l group,group  Give the users these local UNIX groups
+                                    Comma seperated list
+                    -s group        Specify an IAM group for users who should be given sudo privileges, or leave
+                                    empty to not change sudo access, or give it the value '##ALL##' to have all
+                                    users be given sudo rights.
+
+
+                EOF
+                }
+
+                IAM_GROUPS=""
+                SUDO_GROUP=""
+                LOCAL_GROUPS=""
+                ASSUME_ROLE=""
+
+                while getopts :hva:i:l:s: opt
+                do
+                    case $opt in
+                        h)
+                            show_help
+                            exit 0
+                            ;;
+                        i)
+                            IAM_GROUPS="$OPTARG"
+                            ;;
+                        s)
+                            SUDO_GROUP="$OPTARG"
+                            ;;
+                        l)
+                            LOCAL_GROUPS="$OPTARG"
+                            ;;
+                        v)
+                            set -x
+                            ;;
+                        a)
+                            ASSUME_ROLE="$OPTARG"
+                            ;;
+                        \?)
+                            echo "Invalid option: -$OPTARG" >&2
+                            show_help
+                            exit 1
+                            ;;
+                        :)
+                            echo "Option -$OPTARG requires an argument." >&2
+                            show_help
+                            exit 1
+                    esac
+                done
+
+                tmpdir=$(mktemp -d)
+
+                cd "$tmpdir"
+
+                git clone https://github.com/widdix/aws-ec2-ssh.git
+
+                cd "$tmpdir/aws-ec2-ssh"
+
+                cp authorized_keys_command.sh /opt/authorized_keys_command.sh
+                cp import_users.sh /opt/import_users.sh
+
+                # To control which users are imported/synced, uncomment the line below
+                # changing GROUPNAMES to a comma seperated list of IAM groups you want to sync.
+                # You can specify 1 or more groups, comma seperated, without spaces.
+                # If you leave it blank, all IAM users will be synced.
+                if [ "${IAM_GROUPS}" != "" ]
+                then
+                    echo "IAM_AUTHORIZED_GROUPS=\"${IAM_GROUPS}\"" >> /etc/aws-ec2-ssh.conf
+                fi
+
+                # To control which users are given sudo privileges, uncomment the line below
+                # changing GROUPNAME to either the name of the IAM group for sudo users, or
+                # to ##ALL## to give all users sudo access. If you leave it blank, no users will
+                # be given sudo access.
+                if [ "${SUDO_GROUP}" != "" ]
+                then
+                    echo "SUDOERSGROUP=\"${SUDO_GROUP}\"" >> /etc/aws-ec2-ssh.conf
+                fi
+
+                # To control which local groups a user will get, uncomment the line belong
+                # changing GROUPNAMES to a comma seperated list of local UNIX groups.
+                # If you live it blank, this setting will be ignored
+                if [ "${LOCAL_GROUPS}" != "" ]
+                then
+                    echo "LOCAL_GROUPS=\"${LOCAL_GROUPS}\"" >> /etc/aws-ec2-ssh.conf
+                fi
+
+                # If your IAM users are in another AWS account, put the AssumeRole ARN here.
+                # replace the word ASSUMEROLEARN with the full arn. eg 'arn:aws:iam::$accountid:role/$role'
+                # See docs/multiawsaccount.md on how to make this work
+                if [ "${ASSUME_ROLE}" != "" ]
+                then
+                    echo "ASSUMEROLE=\"${ASSUME_ROLE}\"" >> /etc/aws-ec2-ssh.conf
+                fi
+
+                sed -i 's:#AuthorizedKeysCommand none:AuthorizedKeysCommand /opt/authorized_keys_command.sh:g' /etc/ssh/sshd_config
+                sed -i 's:#AuthorizedKeysCommandUser nobody:AuthorizedKeysCommandUser nobody:g' /etc/ssh/sshd_config
+
+                echo "*/10 * * * * root /opt/import_users.sh" > /etc/cron.d/import_users
+                chmod 0644 /etc/cron.d/import_users
+
+                /opt/import_users.sh
+
+                service sshd restart
+              mode: '000755'
+              owner: root
+              group: root
+          commands:
+            a_install:
+              command: !Sub './install.sh -a "${AssumeRole}"'
+              cwd: '/opt'
+          services:
+            sysvinit:
+              sshd:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      IamInstanceProfile: !Ref InstanceProfile
+      InstanceType: 't2.micro'
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -x
+          /opt/aws/bin/cfn-init --verbose --stack=${AWS::StackName} --region=${AWS::Region} --resource=Instance
+          /opt/aws/bin/cfn-signal --exit-code=$? --stack=${AWS::StackName} --region=${AWS::Region} --resource=Instance
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: true
+        DeleteOnTermination: true
+        SubnetId: !Ref Subnet
+        DeviceIndex: 0
+        GroupSet:
+        - !Ref SecurityGroup
+      Tags:
+      - Key: Name
+        Value: 'AWS EC2 SSH access with IAM showcase'
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+Outputs:
+  PublicName:
+    Description: 'The public name of the EC2 instance.'
+    Value: !GetAtt 'Instance.PublicDnsName'
