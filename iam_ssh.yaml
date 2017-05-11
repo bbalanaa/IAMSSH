@@ -232,7 +232,7 @@ Resources:
                 sed -i 's:#AuthorizedKeysCommand none:AuthorizedKeysCommand /opt/authorized_keys_command.sh:g' /etc/ssh/sshd_config
                 sed -i 's:#AuthorizedKeysCommandUser nobody:AuthorizedKeysCommandUser nobody:g' /etc/ssh/sshd_config
 
-                echo "*/10 * * * * root /opt/import_users.sh" > /etc/cron.d/import_users
+                echo "*/15 * * * * root /opt/import_users.sh" > /etc/cron.d/import_users
                 chmod 0644 /etc/cron.d/import_users
 
                 /opt/import_users.sh
@@ -252,6 +252,7 @@ Resources:
                 ensureRunning: true
     Properties:
       ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      KeyName: non-prod-ops
       IamInstanceProfile: !Ref InstanceProfile
       InstanceType: 't2.micro'
       KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
